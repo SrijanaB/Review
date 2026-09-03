@@ -1,3 +1,5 @@
+# Fallback only. Prefer: sudo python3 live_capture.py
+# This file invents HTTP-like fields and is not real router traffic.
 import requests
 import random
 import time
