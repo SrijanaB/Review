@@ -1,9 +1,4 @@
-"""Shared contract between live capture and the ML pipeline.
-
-Why this exists: Elasticsearch docs must use the same field names the
-Isolation Forest later reads. If capture writes `dst_port` and ML looks
-for `status_code`, the model trains on zeros and the dashboard looks empty.
-"""
+"""Shared contract between live capture and the ML pipeline."""
 
 ES_URL = "http://localhost:9200"
 LOGS_INDEX = "logs"
@@ -16,7 +11,20 @@ PROTOCOL_TO_NUM = {
     "OTHER": 0,
 }
 
-# Numeric columns Isolation Forest can actually train on.
-# IPs and flag strings stay in Elasticsearch for Kibana, but they are not
-# model features (the forest needs numbers, not addresses).
-ML_FEATURE_COLUMNS = ["bytes", "src_port", "dst_port", "protocol_num"]
+# Behaviour windows, not single packets.
+WINDOW_SECONDS = 10
+MIN_BASELINE_WINDOWS = 6
+THRESHOLD_SIGMA = 2.0
+# Windows with this many times the baseline max unique dest ports are a scan.
+PORT_SCAN_MULT = 2.0
+
+# Isolation Forest trains on these aggregated window features.
+ML_FEATURE_COLUMNS = [
+    "packets",
+    "bytes",
+    "unique_dst_ips",
+    "unique_dst_ports",
+    "tcp_count",
+    "udp_count",
+    "syn_count",
+]

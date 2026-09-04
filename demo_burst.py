@@ -11,14 +11,19 @@ live_capture.py also listens on lo0 so these packets are ingested.
 import argparse
 import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 LOCALHOST = "127.0.0.1"
 
 
 def scan_local_ports(start: int, end: int) -> None:
-    """Many destination ports on localhost looks like reconnaissance."""
-    print(f"TCP connect burst to {LOCALHOST} ports {start}-{end} (expected: mostly refused)")
-    for port in range(start, end + 1):
+    """Many destination ports in a few seconds — one anomalous 10s window."""
+    print(
+        f"TCP connect burst to {LOCALHOST} ports {start}-{end} "
+        "(expected: mostly refused)"
+    )
+
+    def hit(port: int) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(0.05)
         try:
@@ -28,15 +33,18 @@ def scan_local_ports(start: int, end: int) -> None:
         finally:
             sock.close()
 
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        list(pool.map(hit, range(start, end + 1)))
 
-def udp_flood_local(count: int, port: int) -> None:
-    """Many tiny UDP packets to one local port looks like a flood."""
-    print(f"UDP flood: {count} packets to {LOCALHOST}:{port}")
+
+def udp_scan_local(count: int, base_port: int) -> None:
+    """UDP to many dest ports so unique_dst_ports spikes even if TCP SYNs are sparse."""
+    print(f"UDP scan: {count} packets to {LOCALHOST}:{base_port}-{base_port + count - 1}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     payload = b"x" * 16
     try:
-        for _ in range(count):
-            sock.sendto(payload, (LOCALHOST, port))
+        for i in range(count):
+            sock.sendto(payload, (LOCALHOST, base_port + i))
     finally:
         sock.close()
 
@@ -49,12 +57,12 @@ def main() -> None:
         "--mode",
         choices=("scan", "flood", "both"),
         default="both",
-        help="scan = many local ports; flood = many tiny UDP packets",
+        help="scan = many local TCP ports; flood = many UDP dest ports",
     )
     parser.add_argument("--start-port", type=int, default=1)
-    parser.add_argument("--end-port", type=int, default=200)
+    parser.add_argument("--end-port", type=int, default=400)
     parser.add_argument("--flood-count", type=int, default=400)
-    parser.add_argument("--flood-port", type=int, default=9)
+    parser.add_argument("--flood-port", type=int, default=20000)
     args = parser.parse_args()
 
     if args.start_port < 1 or args.end_port > 65535 or args.start_port > args.end_port:
@@ -65,8 +73,8 @@ def main() -> None:
     if args.mode in ("scan", "both"):
         scan_local_ports(args.start_port, args.end_port)
     if args.mode in ("flood", "both"):
-        udp_flood_local(args.flood_count, args.flood_port)
-    print("Done. Check Kibana / ml-results after the next ML cycle (~10s).")
+        udp_scan_local(args.flood_count, args.flood_port)
+    print("Done. Wait one completed 10s window, then check Kibana for a port-count spike.")
 
 
 if __name__ == "__main__":

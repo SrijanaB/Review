@@ -13,6 +13,7 @@ Limits:
   Loopback (lo0) is included so localhost demo bursts show up in Kibana.
 """
 
+import hashlib
 import json
 import os
 import subprocess
@@ -25,9 +26,10 @@ from scapy.all import ICMP, IP, TCP, UDP, conf, sniff
 
 from packet_schema import ES_URL, LOGS_INDEX, PROTOCOL_TO_NUM
 
-BULK_SIZE = 20
+BULK_SIZE = 100
 SNIFF_TIMEOUT_SEC = 2.0
 ES_BULK_URL = f"{ES_URL}/_bulk"
+_pkt_seq = 0
 
 
 def utc_now():
@@ -81,7 +83,15 @@ def packet_to_doc(pkt):
     elif ICMP in pkt:
         protocol = "ICMP"
 
+    timestamp = utc_now()
+    global _pkt_seq
+    _pkt_seq += 1
+    # time_ns + seq so a UDP flood (same 5-tuple) does not overwrite one ES _id
+    event_id = hashlib.sha1(
+        f"{time.time_ns()}|{_pkt_seq}|{ip.src}|{ip.dst}|{src_port}|{dst_port}|{protocol}".encode()
+    ).hexdigest()[:16]
     return {
+        "event_id": event_id,
         "src_ip": ip.src,
         "dst_ip": ip.dst,
         "src_port": src_port,
@@ -90,7 +100,7 @@ def packet_to_doc(pkt):
         "protocol_num": PROTOCOL_TO_NUM[protocol],
         "bytes": int(len(pkt)),
         "flags": flags,
-        "@timestamp": utc_now(),
+        "@timestamp": timestamp,
     }
 
 
@@ -101,7 +111,11 @@ def flush_docs(docs):
 
     lines = []
     for doc in docs:
-        lines.append(f'{{"index":{{"_index":"{LOGS_INDEX}"}}}}')
+        doc_id = doc.get("event_id")
+        if doc_id:
+            lines.append(f'{{"index":{{"_index":"{LOGS_INDEX}","_id":"{doc_id}"}}}}')
+        else:
+            lines.append(f'{{"index":{{"_index":"{LOGS_INDEX}"}}}}')
         lines.append(json.dumps(doc))
     payload = "\n".join(lines) + "\n"
 

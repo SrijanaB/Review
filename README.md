@@ -13,6 +13,7 @@ You see **this laptop only** (current Wi-Fi + loopback). Other devices on the sa
 | `live_capture.py` | Sniffs this Mac, writes header-only JSON to index `logs` |
 | `ml_pipeline.py` | Isolation Forest on recent packets → index `ml-results` |
 | `demo_burst.py` | Optional localhost-only scan/flood so anomalies appear in a demo |
+| `create_kibana_dashboard.py` | Creates the **SHIELD live traffic** Analytics dashboard in Kibana |
 | `data_simulator.py` | Old fake HTTP generator (fallback only; do not use for the review) |
 
 ```
@@ -75,37 +76,77 @@ source .venv/bin/activate
 python ml_pipeline.py
 ```
 
-It waits until at least 20 recent packets exist, then scores every ~10 seconds.
+It waits for **8 completed 10-second windows** of normal browsing, fits Isolation Forest with `contamination="auto"`, and sets a threshold at **mean − 3σ** of those baseline scores. It does **not** assume 5% of traffic is malicious.
 
-- `anomaly = -1` → unusual
-- `anomaly = 1` → typical
+- `status = NORMAL` / `anomaly = 1` → score above the learned threshold
+- `status = ANOMALY` / `anomaly = -1` → score below the threshold
 
-### 4. Terminal C — optional demo burst (while capture is running)
+Each window is stored once (`event_id = window-<epoch>`).
+
+### 4. Terminal C — demo burst (only after the baseline is ready)
+
+Browse normally for ~90 seconds first. When the ML terminal prints `Baseline ready`, then:
 
 ```bash
 source .venv/bin/activate
 python demo_burst.py
 ```
 
-This only hits `127.0.0.1`. Then browse a few websites so real Wi-Fi packets appear too.
+That hits **127.0.0.1 only** (about 300 ports + 500 UDP packets in a few seconds). The next completed window should show a high `unique_dst_ports` count and `ANOMALY`.
 
 ### 5. Open Kibana (your logs and analysis)
 
 Must be **http**, not https:
 
 - Home: http://127.0.0.1:5601
-- **Logs / analysis:** http://127.0.0.1:5601/app/discover
+- **Analytics dashboard (charts):** http://127.0.0.1:5601/app/dashboards#/view/shield-live-traffic
+- **Data visualizer (field stats):** http://127.0.0.1:5601/app/dashboards#/view/shield-data-visualizer
+- **ML Data Visualizer (logs):** http://127.0.0.1:5601/app/ml/datavisualizer_index_view?index=75ce9249-fc92-48f3-87a9-29e4f25787d0
+- **ML Data Visualizer (ml-results):** http://127.0.0.1:5601/app/ml/datavisualizer_index_view?index=cabb1875-67ae-4343-ad04-bac763cfecb0
+- **Discover (row table):** http://127.0.0.1:5601/app/discover
 
-Kibana’s first screen looks like a product website. That is not the packet table. Use **Discover**.
+Kibana’s first screen looks like a product website. That is not your data.
 
-First time in Discover:
+**Analytics → Dashboard** should list **SHIELD live traffic**. If it is missing after a fresh `docker compose up`, recreate it:
 
-1. Create a data view **Live packets** — index `logs*`, time field `@timestamp`
-2. Create a data view **Anomaly results** — index `ml-results*`, time field `@timestamp`
-3. Top-left dropdown → **Live packets** for raw traffic
-4. Same dropdown → **Anomaly results** for ML flags
-5. Top-right time picker → **Last 15 minutes** (empty table is almost always the time range)
-6. To see only outliers, search: `anomaly: -1`
+```bash
+source .venv/bin/activate
+python create_kibana_dashboard.py
+```
+
+**Analytics → Dashboard** also lists **SHIELD data visualizer**: total packets, unique destination IPs, average size, anomaly count, plus field tables for `src_ip`, `dst_port`, `protocol`, and `anomaly`.
+
+Kibana **Machine Learning → Data Visualizer → Data view** shows the official field-by-field stats page. Pick **Live packets** or **Anomaly results**.
+
+The live-traffic dashboard centerpiece is **anomalous windows over time**, plus unique destination ports per window and an investigate table (`status: ANOMALY`). Supporting charts: normal vs anomaly, packet count, protocol. Set time to **Last 15 minutes**. After changing ML fields, recreate:
+
+```bash
+python create_kibana_dashboard.py
+```
+
+Discover on **Anomaly results** and filter `status: ANOMALY` to see which window caused the spike (`unique_dst_ports`, `packets`, `syn_count`, `anomaly_score`).
+
+**Discover** (the table):
+
+1. Data views: **Live packets** (`logs*`) and **Anomaly results** (`ml-results*`)
+2. Top-left dropdown → pick one of those views
+3. Top-right time picker → **Last 15 minutes** or **Last 24 hours**
+4. To see only outliers: `status: ANOMALY`
+
+If Kibana says **Create a data view**, do not skip it — fill the form:
+
+1. Name: `Live packets`
+2. Index pattern: `logs*` (you should see a hit count)
+3. Timestamp field: `@timestamp`
+4. Save
+5. Repeat: name `Anomaly results`, index pattern `ml-results*`, timestamp `@timestamp`
+
+Or recreate both from the project folder:
+
+```bash
+source .venv/bin/activate
+python create_kibana_dashboard.py
+```
 
 If the page says “Kibana is not ready yet”, wait ~1 minute and hard-refresh (Cmd + Shift + R).
 
@@ -122,14 +163,26 @@ If the page says “Kibana is not ready yet”, wait ~1 minute and hard-refresh 
 
 ## Fields
 
+Packet fields in `logs`:
+
 | Field | Meaning |
 |---|---|
+| `event_id` | Unique packet id (used as Elasticsearch `_id`) |
 | `src_ip` / `dst_ip` | Who sent / who received |
-| `src_port` / `dst_port` | Application ports (443 = HTTPS, 53 = DNS, …) |
-| `protocol` | TCP, UDP, ICMP, or OTHER |
-| `bytes` | Frame size (length only; payload is not stored) |
-| `flags` | TCP flags (S = SYN, A = ACK, …) |
-| `anomaly` | `-1` unusual, `1` typical (in `ml-results` only) |
+| `src_port` / `dst_port` | Application ports |
+| `protocol` / `bytes` / `flags` | Header metadata only |
+
+Window fields in `ml-results`:
+
+| Field | Meaning |
+|---|---|
+| `event_id` | `window-<epoch>` — one document per 10s window |
+| `packets` / `bytes` | Volume in that window |
+| `unique_dst_ports` / `unique_dst_ips` | Behaviour features (scan = many ports) |
+| `tcp_count` / `udp_count` / `syn_count` | Protocol mix |
+| `anomaly_score` | Isolation Forest `decision_function` (lower = more unusual) |
+| `threshold` | Learned from baseline (`mean − 3σ`) |
+| `anomaly` / `status` | `-1` / `ANOMALY` or `1` / `NORMAL` |
 
 ## What you will not see
 
