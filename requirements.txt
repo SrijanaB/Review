@@ -1,0 +1,5 @@
+requests
+elasticsearch>=8,<9
+pandas
+scikit-learn
+scapy
